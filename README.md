@@ -142,14 +142,24 @@ config_basic_auth = {
 ```
 
 **Note on Environment Variables for Server Application:**
-When running the MCP server application (e.g., `src/server.py`), it needs to be able to read these AWS credentials from environment variables and construct the appropriate configuration dictionary for the search client. For example, you might define environment variables like:
-- `MCP_AWS_ACCESS_KEY_ID` (or a generic `AWS_ACCESS_KEY_ID`)
-- `MCP_AWS_SECRET_ACCESS_KEY` (or `AWS_SECRET_ACCESS_KEY`)
-- `MCP_AWS_SESSION_TOKEN` (or `AWS_SESSION_TOKEN`)
-- `MCP_AWS_REGION_NAME` (or `AWS_REGION_NAME`)
-- `MCP_AWS_SERVICE_NAME` (or `AWS_SERVICE_NAME`)
+The MCP server application (`src/server.py`) reads AWS credentials from environment variables and constructs the appropriate configuration dictionary for the search client. You can use the following environment variables:
 
-The server script (`src/server.py`) would then need to be updated to read these specific environment variables (and potentially prefix them, e.g., `ELASTICSEARCH_AWS_ACCESS_KEY_ID` or `OPENSEARCH_AWS_ACCESS_KEY_ID` if managing multiple client types) and pass them into the `config` dictionary for `SearchClientBase`. This part of the README describes the client library's direct config; adapting the server application to use these new env vars is a separate implementation step if not already present.
+**Service-specific AWS environment variables (recommended):**
+- `ELASTICSEARCH_AWS_ACCESS_KEY_ID` / `OPENSEARCH_AWS_ACCESS_KEY_ID`: AWS access key ID
+- `ELASTICSEARCH_AWS_SECRET_ACCESS_KEY` / `OPENSEARCH_AWS_SECRET_ACCESS_KEY`: AWS secret access key  
+- `ELASTICSEARCH_AWS_SESSION_TOKEN` / `OPENSEARCH_AWS_SESSION_TOKEN`: AWS session token (if using temporary credentials)
+- `ELASTICSEARCH_AWS_PROFILE_NAME` / `OPENSEARCH_AWS_PROFILE_NAME`: AWS profile name from ~/.aws/credentials or ~/.aws/config
+- `ELASTICSEARCH_AWS_REGION_NAME` / `OPENSEARCH_AWS_REGION_NAME`: AWS region name
+- `ELASTICSEARCH_AWS_SERVICE_NAME` / `OPENSEARCH_AWS_SERVICE_NAME`: AWS service name (defaults to "es" for Elasticsearch, use "aoss" for OpenSearch Serverless)
+
+**Generic AWS environment variables (fallback):**
+- `AWS_ACCESS_KEY_ID`: AWS access key ID
+- `AWS_SECRET_ACCESS_KEY`: AWS secret access key
+- `AWS_SESSION_TOKEN`: AWS session token
+- `AWS_PROFILE_NAME`: AWS profile name
+- `AWS_REGION_NAME` / `AWS_DEFAULT_REGION`: AWS region name
+
+The server will first check for service-specific environment variables (prefixed with `ELASTICSEARCH_` or `OPENSEARCH_`), and fall back to generic AWS environment variables if not found.
 
 ## Configure Environment Variables
 
@@ -186,7 +196,7 @@ npx -y @smithery/cli install elasticsearch-mcp-server --client claude
 Using `uvx` will automatically install the package from PyPI, no need to clone the repository locally. Add the following configuration to Claude Desktop's config file `claude_desktop_config.json`.
 
 ```json
-// For Elasticsearch
+// For Elasticsearch with Basic Authentication
 {
   "mcpServers": {
     "elasticsearch-mcp-server": {
@@ -203,7 +213,26 @@ Using `uvx` will automatically install the package from PyPI, no need to clone t
   }
 }
 
-// For OpenSearch
+// For Elasticsearch with AWS SigV4 Authentication using AWS Profile
+{
+  "mcpServers": {
+    "elasticsearch-mcp-server": {
+      "command": "uvx",
+      "args": [
+        "elasticsearch-mcp-server"
+      ],
+      "env": {
+        "ELASTICSEARCH_HOSTS": "https://your-domain.us-east-1.es.amazonaws.com:443",
+        "ELASTICSEARCH_AWS_PROFILE_NAME": "my-aws-profile",
+        "ELASTICSEARCH_AWS_REGION_NAME": "us-east-1",
+        "ELASTICSEARCH_AWS_SERVICE_NAME": "es",
+        "ELASTICSEARCH_VERIFY_CERTS": "true"
+      }
+    }
+  }
+}
+
+// For OpenSearch with Basic Authentication
 {
   "mcpServers": {
     "opensearch-mcp-server": {
@@ -219,6 +248,26 @@ Using `uvx` will automatically install the package from PyPI, no need to clone t
     }
   }
 }
+
+// For OpenSearch with AWS SigV4 Authentication using Direct Keys
+{
+  "mcpServers": {
+    "opensearch-mcp-server": {
+      "command": "uvx",
+      "args": [
+        "opensearch-mcp-server"
+      ],
+      "env": {
+        "OPENSEARCH_HOSTS": "https://your-domain.us-west-2.aoss.amazonaws.com:443",
+        "OPENSEARCH_AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+        "OPENSEARCH_AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "OPENSEARCH_AWS_REGION_NAME": "us-west-2",
+        "OPENSEARCH_AWS_SERVICE_NAME": "aoss",
+        "OPENSEARCH_VERIFY_CERTS": "true"
+      }
+    }
+  }
+}
 ```
 
 ### Option 3: Using uv with local development
@@ -226,7 +275,7 @@ Using `uvx` will automatically install the package from PyPI, no need to clone t
 Using `uv` requires cloning the repository locally and specifying the path to the source code. Add the following configuration to Claude Desktop's config file `claude_desktop_config.json`.
 
 ```json
-// For Elasticsearch
+// For Elasticsearch with Basic Authentication
 {
   "mcpServers": {
     "elasticsearch-mcp-server": {
@@ -246,7 +295,28 @@ Using `uv` requires cloning the repository locally and specifying the path to th
   }
 }
 
-// For OpenSearch
+// For Elasticsearch with AWS SigV4 Authentication using AWS Profile
+{
+  "mcpServers": {
+    "elasticsearch-mcp-server": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "path/to/src/elasticsearch_mcp_server",
+        "run",
+        "elasticsearch-mcp-server"
+      ],
+      "env": {
+        "ELASTICSEARCH_HOSTS": "https://your-domain.us-east-1.es.amazonaws.com:443",
+        "ELASTICSEARCH_AWS_PROFILE_NAME": "my-aws-profile",
+        "ELASTICSEARCH_AWS_REGION_NAME": "us-east-1",
+        "ELASTICSEARCH_VERIFY_CERTS": "true"
+      }
+    }
+  }
+}
+
+// For OpenSearch with Basic Authentication
 {
   "mcpServers": {
     "opensearch-mcp-server": {
