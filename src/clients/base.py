@@ -99,7 +99,8 @@ def _get_sigv4_details(config: Dict) -> Optional[Dict]:
         logger.error(f"SigV4: Unexpected error initializing Boto3 session for {source_log_msg}: {e}")
     return None
 
-class BotocoreSigV4Auth(requests.auth.AuthBase):
+class ElasticsearchSigV4Auth(requests.auth.AuthBase):
+    """SigV4 Auth for Elasticsearch client (requests-based)"""
     def __init__(self, access_key: str, secret_key: str, session_token: Optional[str], region: str, service: str):
         self.credentials = botocore.credentials.Credentials(
             access_key=access_key, secret_key=secret_key, token=session_token)
@@ -108,23 +109,47 @@ class BotocoreSigV4Auth(requests.auth.AuthBase):
         self.sigv4 = botocore.auth.SigV4Auth(self.credentials, self.service, self.region)
 
     def __call__(self, r: requests.PreparedRequest):
+        """Standard requests.auth.AuthBase signature - accepts PreparedRequest"""
         aws_request = botocore.awsrequest.AWSRequest(
             method=r.method.upper(), url=r.url, data=r.body, headers=dict(r.headers))
         self.sigv4.add_auth(aws_request)
         r.headers.update(aws_request.headers)
         return r
 
+class OpenSearchSigV4Auth:
+    """SigV4 Auth for OpenSearch client"""
+    def __init__(self, access_key: str, secret_key: str, session_token: Optional[str], region: str, service: str):
+        self.credentials = botocore.credentials.Credentials(
+            access_key=access_key, secret_key=secret_key, token=session_token)
+        self.region = region
+        self.service = service
+        self.sigv4 = botocore.auth.SigV4Auth(self.credentials, self.service, self.region)
+
+    def __call__(self, method: str, url: str, body: Optional[bytes]):
+        """Auth callable for OpenSearchPy's Urllib3HttpConnection.
+        Receives method, full_url, and request_body from opensearch-py.
+        """
+        # 'url' is the full URL from opensearch-py, potentially including query string.
+        # 'body' is the request body content from opensearch-py.
+        # For AWSRequest:
+        # - 'data' should be this 'body'.
+        # - 'params' should be None, as botocore can parse query from 'url' if needed.
+        aws_request = botocore.awsrequest.AWSRequest(
+            method=method.upper(), url=url, data=body, params=None)
+        self.sigv4.add_auth(aws_request)
+        return dict(aws_request.headers)
+
 class SearchClientBase(ABC):
     def __init__(self, config: Dict, engine_type: str):
         self.logger = logger
         self.config = config
         self.engine_type = engine_type
-        
+
         hosts = config.get("hosts")
         username = config.get("username")
         password = config.get("password")
         verify_certs = config.get("verify_certs", False)
-        
+
         sigv4_details = _get_sigv4_details(config)
 
         if not verify_certs:
@@ -135,20 +160,20 @@ class SearchClientBase(ABC):
                 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             except ImportError:
                 pass
-        
+
         auth_instance = None
         log_message_suffix = ""
         if sigv4_details:
-            auth_instance = BotocoreSigV4Auth(
-                access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
-                session_token=sigv4_details["token"], region=sigv4_details["region"],
-                service=sigv4_details["service"])
             log_message_suffix = f"using SigV4 ({sigv4_details['source_log_msg']}) for service {sigv4_details['service']} in region {sigv4_details['region']}"
 
         if engine_type == "elasticsearch":
-            if auth_instance:
+            if sigv4_details:
+                auth_instance = ElasticsearchSigV4Auth(
+                    access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
+                    session_token=sigv4_details["token"], region=sigv4_details["region"],
+                    service=sigv4_details["service"])
                 self.client = Elasticsearch(
-                    hosts=hosts, http_auth=auth_instance, verify_certs=verify_certs, use_ssl=True)
+                    hosts=hosts, http_auth=auth_instance, verify_certs=verify_certs)
                 self.logger.info(f"Elasticsearch client initialized {log_message_suffix} for hosts: {hosts}")
             elif username and password:
                 self.client = Elasticsearch(
@@ -158,7 +183,11 @@ class SearchClientBase(ABC):
                 self.client = Elasticsearch(hosts=hosts, verify_certs=verify_certs)
                 self.logger.info(f"Elasticsearch client initialized with no auth for hosts: {hosts}")
         elif engine_type == "opensearch":
-            if auth_instance:
+            if sigv4_details:
+                auth_instance = OpenSearchSigV4Auth(
+                    access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
+                    session_token=sigv4_details["token"], region=sigv4_details["region"],
+                    service=sigv4_details["service"])
                 self.client = OpenSearch(
                     hosts=hosts, http_auth=auth_instance, use_ssl=True, verify_certs=verify_certs)
                 self.logger.info(f"OpenSearch client initialized {log_message_suffix} for hosts: {hosts}")
@@ -175,7 +204,7 @@ class SearchClientBase(ABC):
         base_url = hosts[0] if isinstance(hosts, list) else hosts
         self.general_client = GeneralRestClient(base_url=base_url, config=config, verify_certs=verify_certs)
 
-class SigV4Auth(httpx.Auth):
+class HttpSigV4Auth(httpx.Auth):
     def __init__(self, access_key: str, secret_key: str, session_token: Optional[str], region: str, service: str):
         self.credentials = botocore.credentials.Credentials(
             access_key=access_key, secret_key=secret_key, token=session_token)
@@ -200,7 +229,7 @@ class GeneralRestClient:
         sigv4_details = _get_sigv4_details(config)
 
         if sigv4_details:
-            self.auth = SigV4Auth(
+            self.auth = HttpSigV4Auth(
                 access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
                 session_token=sigv4_details["token"], region=sigv4_details["region"],
                 service=sigv4_details["service"])

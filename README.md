@@ -350,7 +350,7 @@ Now you can interact with your Elasticsearch/OpenSearch cluster through Claude u
 ## Usage with Anthropic MCP Client
 
 ```python
-uv run mcp_client/client.py src/server.py
+uv run mcp_client/python-sdk-anthropic/client.py src/server.py
 ```
 
 ## License

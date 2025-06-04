@@ -6,8 +6,9 @@ import sys
 from src.clients.base import (
     SearchClientBase,
     GeneralRestClient,
-    BotocoreSigV4Auth as RequestsBotocoreSigV4Auth,
-    SigV4Auth as HttpxSigV4Auth,
+    ElasticsearchSigV4Auth,
+    OpenSearchSigV4Auth,
+    HttpSigV4Auth as HttpxSigV4Auth,
     _get_sigv4_details
 )
 
@@ -130,17 +131,36 @@ class TestClientInitialization(unittest.TestCase):
             "region": "mock_region", "service": "es"
         }
 
-    @patch('src.clients.base.RequestsBotocoreSigV4Auth')
+    @patch('src.clients.base.ElasticsearchSigV4Auth')
+    @patch('src.clients.base.Elasticsearch')
+    @patch('src.clients.base._get_sigv4_details')
+    def test_scb_elasticsearch_uses_sigv4_from_helper(self, mock_get_details, MockElasticsearch, MockElasticsearchAuth):
+        mock_get_details.return_value = self.sample_sigv4_details_from_helper
+        mock_auth_instance = MockElasticsearchAuth.return_value
+        client = SearchClientBase(self.base_config, engine_type="elasticsearch")
+        self.assertEqual(mock_get_details.call_count, 2)
+        MockElasticsearchAuth.assert_called_once_with(**self.expected_auth_constructor_args)
+        MockElasticsearch.assert_called_once_with(
+            hosts=['http://localhost:9200'],
+            http_auth=mock_auth_instance,
+            verify_certs=False
+        )
+
+    @patch('src.clients.base.OpenSearchSigV4Auth')
     @patch('src.clients.base.OpenSearch')
     @patch('src.clients.base._get_sigv4_details')
-    def test_scb_opensearch_uses_sigv4_from_helper(self, mock_get_details, MockOpenSearch, MockReqAuth):
+    def test_scb_opensearch_uses_sigv4_from_helper(self, mock_get_details, MockOpenSearch, MockOpenSearchAuth):
         mock_get_details.return_value = self.sample_sigv4_details_from_helper
-        mock_auth_instance = MockReqAuth.return_value
+        mock_auth_instance = MockOpenSearchAuth.return_value
         client = SearchClientBase(self.base_config, engine_type="opensearch")
         self.assertEqual(mock_get_details.call_count, 2)
-        MockReqAuth.assert_called_once_with(**self.expected_auth_constructor_args)
+        MockOpenSearchAuth.assert_called_once_with(**self.expected_auth_constructor_args)
         MockOpenSearch.assert_called_once_with(
-            hosts=ANY, http_auth=mock_auth_instance, use_ssl=True, verify_certs=ANY)
+            hosts=['http://localhost:9200'],
+            http_auth=mock_auth_instance,
+            use_ssl=True,
+            verify_certs=False
+        )
 
     @patch('src.clients.base.OpenSearch')
     @patch('src.clients.base._get_sigv4_details')
@@ -151,7 +171,7 @@ class TestClientInitialization(unittest.TestCase):
         MockOpenSearch.assert_called_once_with(
             hosts=ANY, http_auth=(self.basic_auth_creds["username"], self.basic_auth_creds["password"]), verify_certs=ANY)
 
-    @patch('src.clients.base.HttpxSigV4Auth')
+    @patch('src.clients.base.HttpSigV4Auth')
     @patch('src.clients.base._get_sigv4_details')
     def test_grc_uses_sigv4_from_helper(self, mock_get_details, MockHttpxAuth):
         mock_get_details.return_value = self.sample_sigv4_details_from_helper
@@ -168,18 +188,63 @@ class TestClientInitialization(unittest.TestCase):
         client = GeneralRestClient(base_url="http://l", config=config, verify_certs=False)
         self.assertIsInstance(client.auth, httpx.BasicAuth)
 
-class TestAuthClassesFull(unittest.TestCase): # Renamed to avoid conflict
+    def test_elasticsearch_sigv4_auth(self):
+        """Test ElasticsearchSigV4Auth works with requests.PreparedRequest"""
+        auth = ElasticsearchSigV4Auth("key", "secret", None, "us-east-1", "es")
+
+        # Create a mock PreparedRequest
+        mock_request = MagicMock()
+        mock_request.method = "GET"
+        mock_request.url = "https://example.com/index"
+        mock_request.body = None
+        mock_request.headers = {}
+
+        # This should work without raising an exception
+        result = auth(mock_request)
+        self.assertEqual(result, mock_request)  # Should return the same request object
+
+    def test_opensearch_sigv4_auth(self):
+        """Test OpenSearchSigV4Auth works with OpenSearch signature (4 arguments)"""
+        auth = OpenSearchSigV4Auth("key", "secret", None, "us-east-1", "es")
+
+        # This should work without raising an exception
+        result = auth("GET", "https://example.com/index", "", None)
+        self.assertIsInstance(result, dict)
+
+class TestAuthClassesFull(unittest.TestCase):
     @patch('src.clients.base.botocore.auth.SigV4Auth')
     @patch('src.clients.base.botocore.awsrequest.AWSRequest')
-    def test_requests_botocore_sigv4_auth_call_full(self, MockAWSRequest, MockBotocoreSigV4Internal):
+    def test_elasticsearch_sigv4_auth_call_full(self, MockAWSRequest, MockBotocoreSigV4Internal):
         mock_botocore_sigv4_instance = MockBotocoreSigV4Internal.return_value
         mock_aws_request_instance = MockAWSRequest.return_value; mock_aws_request_instance.headers = {}
-        auth_handler = RequestsBotocoreSigV4Auth("k", "s", "t", "r", "svc")
+
+        # Create a mock PreparedRequest
+        mock_request = MagicMock()
+        mock_request.method = "POST"
+        mock_request.url = "https://example.com"
+        mock_request.body = b'{"test": "data"}'
+        mock_request.headers = {}
+
+        auth_handler = ElasticsearchSigV4Auth("k", "s", "t", "r", "svc")
         auth_handler.sigv4 = mock_botocore_sigv4_instance
-        mock_req = MagicMock(spec=requests.PreparedRequest); mock_req.method="G"; mock_req.url="u"; mock_req.headers={}; mock_req.body=b""
-        auth_handler(mock_req)
+        # Elasticsearch auth takes PreparedRequest
+        result = auth_handler(mock_request)
         MockAWSRequest.assert_called_once()
         mock_botocore_sigv4_instance.add_auth.assert_called_once()
+        self.assertEqual(result, mock_request)  # Should return the same request object
+
+    @patch('src.clients.base.botocore.auth.SigV4Auth')
+    @patch('src.clients.base.botocore.awsrequest.AWSRequest')
+    def test_opensearch_sigv4_auth_call_full(self, MockAWSRequest, MockBotocoreSigV4Internal):
+        mock_botocore_sigv4_instance = MockBotocoreSigV4Internal.return_value
+        mock_aws_request_instance = MockAWSRequest.return_value; mock_aws_request_instance.headers = {}
+        auth_handler = OpenSearchSigV4Auth("k", "s", "t", "r", "svc")
+        auth_handler.sigv4 = mock_botocore_sigv4_instance
+        # OpenSearch auth takes 4 arguments instead of PreparedRequest
+        result = auth_handler("POST", "https://example.com", "q=test", b'{"test": "data"}')
+        MockAWSRequest.assert_called_once()
+        mock_botocore_sigv4_instance.add_auth.assert_called_once()
+        self.assertIsInstance(result, dict)
 
     @patch('src.clients.base.botocore.auth.SigV4Auth')
     @patch('src.clients.base.botocore.awsrequest.AWSRequest')
