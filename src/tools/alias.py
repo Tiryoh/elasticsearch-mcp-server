@@ -21,26 +21,27 @@ class AliasTools:
             """
             return self.search_client.get_alias(index=index)
 
-        @mcp.tool()
-        def put_alias(index: str, name: str, body: Dict) -> Dict:
-            """
-            Create or update an alias for a specific index.
+        # Only register write operations if not in read-only mode
+        if not getattr(self, 'read_only', False):
+            @mcp.tool()
+            def put_alias(index: str, name: str, body: Dict) -> Dict:
+                """
+                Create or update an alias for a specific index.
 
-            Args:
-                index: Name of the index
-                name: Name of the alias
-                body: Alias configuration
-            """
-            return self.search_client.put_alias(index=index, name=name, body=body)
+                Args:
+                    index: Name of the index
+                    name: Name of the alias
+                    body: Alias configuration
+                """
+                return self.search_client.put_alias(index=index, name=name, body=body)
 
-        @mcp.tool()
-        def delete_alias(index: str, name: str) -> Dict:
-            """
-            Delete an alias for a specific index.
+            @mcp.tool()
+            def delete_alias(index: str, name: str) -> Dict:
+                """
+                Delete an alias for a specific index.
 
-            Args:
-                index: Name of the index
-                name: Name of the alias
-            """
-            return self.search_client.delete_alias(index=index, name=name)
-        
+                Args:
+                    index: Name of the index
+                    name: Name of the alias
+                """
+                return self.search_client.delete_alias(index=index, name=name)
