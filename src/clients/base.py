@@ -37,7 +37,8 @@ def _get_sigv4_details(config: Dict) -> Optional[Dict]:
             "token": aws_session_token,
             "region": region_name,
             "service": aws_service_name,
-            "source_log_msg": source_log_msg
+            "source_log_msg": source_log_msg,
+            "is_refreshable": False
         }
 
     if aws_profile_name:
@@ -58,7 +59,9 @@ def _get_sigv4_details(config: Dict) -> Optional[Dict]:
                     "token": frozen_creds.token,
                     "region": final_region,
                     "service": aws_service_name,
-                    "source_log_msg": source_log_msg
+                    "source_log_msg": source_log_msg,
+                    "boto3_session": session,
+                    "is_refreshable": True
                 }
             else:
                 logger.warning(f"SigV4: Profile '{aws_profile_name}' did not yield credentials.")
@@ -89,7 +92,9 @@ def _get_sigv4_details(config: Dict) -> Optional[Dict]:
                 "token": frozen_creds.token,
                 "region": final_region,
                 "service": aws_service_name,
-                "source_log_msg": source_log_msg
+                "source_log_msg": source_log_msg,
+                "boto3_session": session,
+                "is_refreshable": True
             }
         else:
              logger.warning(f"SigV4: {source_log_msg} did not yield credentials.")
@@ -100,43 +105,89 @@ def _get_sigv4_details(config: Dict) -> Optional[Dict]:
     return None
 
 class ElasticsearchSigV4Auth(requests.auth.AuthBase):
-    """SigV4 Auth for Elasticsearch client (requests-based)"""
-    def __init__(self, access_key: str, secret_key: str, session_token: Optional[str], region: str, service: str):
-        self.credentials = botocore.credentials.Credentials(
-            access_key=access_key, secret_key=secret_key, token=session_token)
+    """SigV4 Auth for Elasticsearch client (requests-based)
+
+    - Supports refreshable credentials
+    - Always signs with the latest credentials for profiles/roles
+    """
+    def __init__(self, access_key: Optional[str], secret_key: Optional[str], 
+                 session_token: Optional[str], region: str, service: str,
+                 boto3_session: Optional[boto3.Session] = None):
+        self.boto3_session = boto3_session
+        self.static_access_key = access_key
+        self.static_secret_key = secret_key
+        self.static_session_token = session_token
         self.region = region
         self.service = service
-        self.sigv4 = botocore.auth.SigV4Auth(self.credentials, self.service, self.region)
 
     def __call__(self, r: requests.PreparedRequest):
         """Standard requests.auth.AuthBase signature - accepts PreparedRequest"""
+        # Always sign with the latest credentials just before use
+        if self.boto3_session is not None:
+            creds = self.boto3_session.get_credentials()
+            frozen = creds.get_frozen_credentials() if creds is not None else None
+            access_key = frozen.access_key if frozen is not None else self.static_access_key
+            secret_key = frozen.secret_key if frozen is not None else self.static_secret_key
+            token = frozen.token if frozen is not None else self.static_session_token
+        else:
+            access_key = self.static_access_key
+            secret_key = self.static_secret_key
+            token = self.static_session_token
+
+        signing_creds = botocore.credentials.Credentials(
+            access_key=access_key, secret_key=secret_key, token=token)
+        sigv4 = botocore.auth.SigV4Auth(signing_creds, self.service, self.region)
         aws_request = botocore.awsrequest.AWSRequest(
             method=r.method.upper(), url=r.url, data=r.body, headers=dict(r.headers))
-        self.sigv4.add_auth(aws_request)
+        sigv4.add_auth(aws_request)
         r.headers.update(aws_request.headers)
         return r
 
 class OpenSearchSigV4Auth:
-    """SigV4 Auth for OpenSearch client"""
-    def __init__(self, access_key: str, secret_key: str, session_token: Optional[str], region: str, service: str):
-        self.credentials = botocore.credentials.Credentials(
-            access_key=access_key, secret_key=secret_key, token=session_token)
+    """SigV4 Auth for OpenSearch client
+
+    - Supports refreshable credentials
+    - Always signs with the latest credentials for profiles/roles
+    """
+    def __init__(self, access_key: Optional[str], secret_key: Optional[str], 
+             session_token: Optional[str], region: str, service: str,
+             boto3_session: Optional[boto3.Session] = None):
+        self.boto3_session = boto3_session
+        self.static_access_key = access_key
+        self.static_secret_key = secret_key
+        self.static_session_token = session_token
         self.region = region
         self.service = service
-        self.sigv4 = botocore.auth.SigV4Auth(self.credentials, self.service, self.region)
 
-    def __call__(self, method: str, url: str, body: Optional[bytes]):
+    def __call__(self, method: str, url: str, query_string: str, body: Optional[bytes]):
         """Auth callable for OpenSearchPy's Urllib3HttpConnection.
-        Receives method, full_url, and request_body from opensearch-py.
+        Receives method, full_url, query_string, and request_body from opensearch-py.
         """
-        # 'url' is the full URL from opensearch-py, potentially including query string.
-        # 'body' is the request body content from opensearch-py.
-        # For AWSRequest:
-        # - 'data' should be this 'body'.
-        # - 'params' should be None, as botocore can parse query from 'url' if needed.
+        # Combine URL and query string if query_string is provided
+        if query_string:
+            separator = '&' if '?' in url else '?'
+            full_url = f"{url}{separator}{query_string}"
+        else:
+            full_url = url
+
+        # Always sign with the latest credentials just before use
+        if self.boto3_session is not None:
+            creds = self.boto3_session.get_credentials()
+            frozen = creds.get_frozen_credentials() if creds is not None else None
+            access_key = frozen.access_key if frozen is not None else self.static_access_key
+            secret_key = frozen.secret_key if frozen is not None else self.static_secret_key
+            token = frozen.token if frozen is not None else self.static_session_token
+        else:
+            access_key = self.static_access_key
+            secret_key = self.static_secret_key
+            token = self.static_session_token
+
+        signing_creds = botocore.credentials.Credentials(
+            access_key=access_key, secret_key=secret_key, token=token)
+        sigv4 = botocore.auth.SigV4Auth(signing_creds, self.service, self.region)
         aws_request = botocore.awsrequest.AWSRequest(
-            method=method.upper(), url=url, data=body, params=None)
-        self.sigv4.add_auth(aws_request)
+            method=method.upper(), url=full_url, data=body, params=None)
+        sigv4.add_auth(aws_request)
         return dict(aws_request.headers)
 
 class SearchClientBase(ABC):
@@ -168,10 +219,16 @@ class SearchClientBase(ABC):
 
         if engine_type == "elasticsearch":
             if sigv4_details:
-                auth_instance = ElasticsearchSigV4Auth(
-                    access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
-                    session_token=sigv4_details["token"], region=sigv4_details["region"],
-                    service=sigv4_details["service"])
+                if sigv4_details.get("boto3_session"):
+                    auth_instance = ElasticsearchSigV4Auth(
+                        access_key=None, secret_key=None, session_token=None,
+                        region=sigv4_details["region"], service=sigv4_details["service"],
+                        boto3_session=sigv4_details["boto3_session"])
+                else:
+                    auth_instance = ElasticsearchSigV4Auth(
+                        access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
+                        session_token=sigv4_details["token"], region=sigv4_details["region"], 
+                        service=sigv4_details["service"])
                 self.client = Elasticsearch(
                     hosts=hosts, http_auth=auth_instance, verify_certs=verify_certs)
                 self.logger.info(f"Elasticsearch client initialized {log_message_suffix} for hosts: {hosts}")
@@ -184,10 +241,16 @@ class SearchClientBase(ABC):
                 self.logger.info(f"Elasticsearch client initialized with no auth for hosts: {hosts}")
         elif engine_type == "opensearch":
             if sigv4_details:
-                auth_instance = OpenSearchSigV4Auth(
-                    access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
-                    session_token=sigv4_details["token"], region=sigv4_details["region"],
-                    service=sigv4_details["service"])
+                if sigv4_details.get("boto3_session"):
+                    auth_instance = OpenSearchSigV4Auth(
+                        access_key=None, secret_key=None, session_token=None,
+                        region=sigv4_details["region"], service=sigv4_details["service"],
+                        boto3_session=sigv4_details["boto3_session"])
+                else:
+                    auth_instance = OpenSearchSigV4Auth(
+                        access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
+                        session_token=sigv4_details["token"], region=sigv4_details["region"], 
+                        service=sigv4_details["service"])
                 self.client = OpenSearch(
                     hosts=hosts, http_auth=auth_instance, use_ssl=True, verify_certs=verify_certs)
                 self.logger.info(f"OpenSearch client initialized {log_message_suffix} for hosts: {hosts}")
@@ -205,17 +268,35 @@ class SearchClientBase(ABC):
         self.general_client = GeneralRestClient(base_url=base_url, config=config, verify_certs=verify_certs)
 
 class HttpSigV4Auth(httpx.Auth):
-    def __init__(self, access_key: str, secret_key: str, session_token: Optional[str], region: str, service: str):
-        self.credentials = botocore.credentials.Credentials(
-            access_key=access_key, secret_key=secret_key, token=session_token)
+    def __init__(self, access_key: Optional[str], secret_key: Optional[str], 
+             session_token: Optional[str], region: str, service: str,
+             boto3_session: Optional[boto3.Session] = None):
+        self.boto3_session = boto3_session
+        self.static_access_key = access_key
+        self.static_secret_key = secret_key
+        self.static_session_token = session_token
         self.region = region
         self.service = service
-        self.sigv4_auth_object = botocore.auth.SigV4Auth(self.credentials, self.service, self.region)
 
     def auth_flow(self, request: httpx.Request):
+        # Always sign with the latest credentials just before use
+        if self.boto3_session is not None:
+            creds = self.boto3_session.get_credentials()
+            frozen = creds.get_frozen_credentials() if creds is not None else None
+            access_key = frozen.access_key if frozen is not None else self.static_access_key
+            secret_key = frozen.secret_key if frozen is not None else self.static_secret_key
+            token = frozen.token if frozen is not None else self.static_session_token
+        else:
+            access_key = self.static_access_key
+            secret_key = self.static_secret_key
+            token = self.static_session_token
+
+        signing_creds = botocore.credentials.Credentials(
+            access_key=access_key, secret_key=secret_key, token=token)
+        sigv4 = botocore.auth.SigV4Auth(signing_creds, self.service, self.region)
         aws_request = botocore.awsrequest.AWSRequest(
             method=request.method, url=str(request.url), data=request.content, headers=dict(request.headers))
-        self.sigv4_auth_object.add_auth(aws_request)
+        sigv4.add_auth(aws_request)
         request.headers.update(aws_request.headers)
         yield request
 
@@ -229,10 +310,16 @@ class GeneralRestClient:
         sigv4_details = _get_sigv4_details(config)
 
         if sigv4_details:
-            self.auth = HttpSigV4Auth(
-                access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
-                session_token=sigv4_details["token"], region=sigv4_details["region"],
-                service=sigv4_details["service"])
+            if sigv4_details.get("boto3_session"):
+                self.auth = HttpSigV4Auth(
+                    access_key=None, secret_key=None, session_token=None,
+                    region=sigv4_details["region"], service=sigv4_details["service"],
+                    boto3_session=sigv4_details["boto3_session"])
+            else:
+                self.auth = HttpSigV4Auth(
+                    access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
+                    session_token=sigv4_details["token"], region=sigv4_details["region"], 
+                    service=sigv4_details["service"])
             self.logger.info(f"GeneralRestClient initialized with SigV4 ({sigv4_details['source_log_msg']}) for service {sigv4_details['service']} in region {sigv4_details['region']} for base_url: {self.base_url}")
         else:
             username = config.get("username")
