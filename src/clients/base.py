@@ -110,7 +110,7 @@ class ElasticsearchSigV4Auth(requests.auth.AuthBase):
     - Supports refreshable credentials
     - Always signs with the latest credentials for profiles/roles
     """
-    def __init__(self, access_key: Optional[str], secret_key: Optional[str], 
+    def __init__(self, access_key: Optional[str], secret_key: Optional[str],
                  session_token: Optional[str], region: str, service: str,
                  boto3_session: Optional[boto3.Session] = None):
         self.boto3_session = boto3_session
@@ -149,7 +149,7 @@ class OpenSearchSigV4Auth:
     - Supports refreshable credentials
     - Always signs with the latest credentials for profiles/roles
     """
-    def __init__(self, access_key: Optional[str], secret_key: Optional[str], 
+    def __init__(self, access_key: Optional[str], secret_key: Optional[str],
              session_token: Optional[str], region: str, service: str,
              boto3_session: Optional[boto3.Session] = None):
         self.boto3_session = boto3_session
@@ -159,36 +159,89 @@ class OpenSearchSigV4Auth:
         self.region = region
         self.service = service
 
-    def __call__(self, method: str, url: str, query_string: str, body: Optional[bytes]):
-        """Auth callable for OpenSearchPy's Urllib3HttpConnection.
-        Receives method, full_url, query_string, and request_body from opensearch-py.
+    def __call__(self, *args, **kwargs):
+        """Auth callable for OpenSearch connections.
+        Supported call signatures:
+        - __call__(request)
+        - __call__(method, url, body)
+        - __call__(method, url, headers, body)
+        - __call__(method, url, query_string, body)
+        - __call__(method=..., url=..., headers=..., body=..., query_string=...)
+        Returns request object if request passed, otherwise returns signed headers dict.
         """
-        # Combine URL and query string if query_string is provided
-        if query_string:
-            separator = '&' if '?' in url else '?'
-            full_url = f"{url}{separator}{query_string}"
-        else:
-            full_url = url
 
-        # Always sign with the latest credentials just before use
-        if self.boto3_session is not None:
-            creds = self.boto3_session.get_credentials()
-            frozen = creds.get_frozen_credentials() if creds is not None else None
-            access_key = frozen.access_key if frozen is not None else self.static_access_key
-            secret_key = frozen.secret_key if frozen is not None else self.static_secret_key
-            token = frozen.token if frozen is not None else self.static_session_token
-        else:
-            access_key = self.static_access_key
-            secret_key = self.static_secret_key
-            token = self.static_session_token
+        def get_fresh_keys():
+            if self.boto3_session is not None:
+                creds = self.boto3_session.get_credentials()
+                frozen = creds.get_frozen_credentials() if creds is not None else None
+                access_key = frozen.access_key if frozen is not None else self.static_access_key
+                secret_key = frozen.secret_key if frozen is not None else self.static_secret_key
+                token = frozen.token if frozen is not None else self.static_session_token
+            else:
+                access_key = self.static_access_key
+                secret_key = self.static_secret_key
+                token = self.static_session_token
+            return access_key, secret_key, token
 
+        def combine_url(url: str, query_string: Optional[str]) -> str:
+            if query_string:
+                separator = '&' if '?' in url else '?'
+                return f"{url}{separator}{query_string}"
+            return url
+
+        # 1) __call__(request)
+        if len(args) == 1 and hasattr(args[0], "method") and hasattr(args[0], "url"):
+            request = args[0]
+            access_key, secret_key, token = get_fresh_keys()
+            signing_creds = botocore.credentials.Credentials(
+                access_key=access_key, secret_key=secret_key, token=token)
+            sigv4 = botocore.auth.SigV4Auth(signing_creds, self.service, self.region)
+            body = getattr(request, "body", None) or getattr(request, "data", None)
+            aws_request = botocore.awsrequest.AWSRequest(
+                method=str(request.method).upper(), url=str(request.url), data=body)
+            sigv4.add_auth(aws_request)
+            if hasattr(request, "headers") and isinstance(request.headers, dict):
+                request.headers.update(aws_request.headers)
+            return request
+
+        # 2) Parse args/kwargs
+        method = None
+        url = None
+        headers = None
+        body = None
+        query_string = None
+
+        if len(args) == 3:
+            method, url, body = args
+        elif len(args) == 4:
+            method, url, third, body = args
+            if isinstance(third, dict):
+                headers = third
+            else:
+                query_string = third
+        else:
+            method = kwargs.get("method")
+            url = kwargs.get("url")
+            headers = kwargs.get("headers")
+            body = kwargs.get("body")
+            query_string = kwargs.get("query_string")
+
+        if method is None or url is None:
+            return {}
+
+        access_key, secret_key, token = get_fresh_keys()
         signing_creds = botocore.credentials.Credentials(
             access_key=access_key, secret_key=secret_key, token=token)
         sigv4 = botocore.auth.SigV4Auth(signing_creds, self.service, self.region)
+        full_url = combine_url(str(url), query_string)
         aws_request = botocore.awsrequest.AWSRequest(
-            method=method.upper(), url=full_url, data=body, params=None)
+            method=str(method).upper(), url=full_url, data=body)
         sigv4.add_auth(aws_request)
-        return dict(aws_request.headers)
+        signed_headers = dict(aws_request.headers)
+        if headers and isinstance(headers, dict):
+            headers.update(signed_headers)
+            return headers
+        return signed_headers
 
 class SearchClientBase(ABC):
     def __init__(self, config: Dict, engine_type: str):
@@ -227,7 +280,7 @@ class SearchClientBase(ABC):
                 else:
                     auth_instance = ElasticsearchSigV4Auth(
                         access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
-                        session_token=sigv4_details["token"], region=sigv4_details["region"], 
+                        session_token=sigv4_details["token"], region=sigv4_details["region"],
                         service=sigv4_details["service"])
                 self.client = Elasticsearch(
                     hosts=hosts, http_auth=auth_instance, verify_certs=verify_certs)
@@ -249,7 +302,7 @@ class SearchClientBase(ABC):
                 else:
                     auth_instance = OpenSearchSigV4Auth(
                         access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
-                        session_token=sigv4_details["token"], region=sigv4_details["region"], 
+                        session_token=sigv4_details["token"], region=sigv4_details["region"],
                         service=sigv4_details["service"])
                 self.client = OpenSearch(
                     hosts=hosts, http_auth=auth_instance, use_ssl=True, verify_certs=verify_certs)
@@ -268,7 +321,7 @@ class SearchClientBase(ABC):
         self.general_client = GeneralRestClient(base_url=base_url, config=config, verify_certs=verify_certs)
 
 class HttpSigV4Auth(httpx.Auth):
-    def __init__(self, access_key: Optional[str], secret_key: Optional[str], 
+    def __init__(self, access_key: Optional[str], secret_key: Optional[str],
              session_token: Optional[str], region: str, service: str,
              boto3_session: Optional[boto3.Session] = None):
         self.boto3_session = boto3_session
@@ -318,7 +371,7 @@ class GeneralRestClient:
             else:
                 self.auth = HttpSigV4Auth(
                     access_key=sigv4_details["access_key"], secret_key=sigv4_details["secret_key"],
-                    session_token=sigv4_details["token"], region=sigv4_details["region"], 
+                    session_token=sigv4_details["token"], region=sigv4_details["region"],
                     service=sigv4_details["service"])
             self.logger.info(f"GeneralRestClient initialized with SigV4 ({sigv4_details['source_log_msg']}) for service {sigv4_details['service']} in region {sigv4_details['region']} for base_url: {self.base_url}")
         else:
